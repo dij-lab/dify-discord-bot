@@ -323,8 +323,12 @@ class DiscordBot {
         let files: VisionFile[] = [];
         let fileGenerationThought: ThoughtItem[] = [];
         let bufferType = "defaultMessage";
+
+        console.log("=== Dify API Request Started ===", reqiest);
+
         await this.difyClient.streamChatMessage(reqiest, {
           onMessage: async (answer, isFirstMessage, { conversationId }) => {
+            console.log("DIFY onMessage received:", answer); // ← 受信データをログ出力
             switch (bufferType) {
               case "defaultMessage":
                 buffer.defaultAnswer += answer;
@@ -339,12 +343,15 @@ class DiscordBot {
             }
           },
           onFile: async (file: DifyFile) => {
+            console.log("DIFY onFile received:", file);
             files.push(file);
           },
           onThought: async (thought) => {
+            console.log("DIFY onThought received:", thought);
             fileGenerationThought.push(thought);
           },
           onNodeStarted: async (nodeStarted) => {
+            console.log("DIFY onNodeStarted:", nodeStarted.data.node_type);
             switch (nodeStarted.data.node_type) {
               case "llm":
                 bufferType = "chatflowAnswer";
@@ -356,6 +363,7 @@ class DiscordBot {
             }
           },
           onNodeFinished: async (nodeFinished) => {
+            console.log("DIFY onNodeFinished:", nodeFinished.data.node_type);
             switch (nodeFinished.data.node_type) {
               case "answer":
                 bufferType = "defaultMessage";
@@ -381,6 +389,10 @@ class DiscordBot {
             }
           },
           onCompleted: () => {
+            console.log("=== Dify API Completed ===");
+            console.log("Final buffer.defaultAnswer:", buffer.defaultAnswer);
+            console.log("Final buffer.chatflowAnswer:", buffer.chatflowAnswer);
+
             resolve({
               messages: this.splitMessage(
                 [buffer.chatflowAnswer, buffer.defaultAnswer]
@@ -401,6 +413,7 @@ class DiscordBot {
           onPing,
         });
       } catch (error: any) {
+        console.error("=== DIFY API CATCH ERROR ===", error);
         reject(error);
       }
     });
