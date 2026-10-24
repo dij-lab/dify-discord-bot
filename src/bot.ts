@@ -16,6 +16,9 @@ import { DifyFile, ThoughtItem, VisionFile } from "./dify-client/dify.types";
 dotenv.config();
 const conversationCache = new Map<string, string>();
 
+// Difyの応答待ちタイムアウト（ミリ秒）
+const DIFY_TIMEOUT_MS = 120_000;
+
 class DiscordBot {
   private client: Client;
   private difyClient: DifyChatClient;
@@ -26,7 +29,10 @@ class DiscordBot {
   private readonly TRIGGER_KEYWORDS: string[];
 
   constructor() {
-    this.TOKEN = process.env.DISCORD_BOT_TOKEN || "";
+    // トークンの前後の空白・引用符を除去（Renderの環境変数貼り付けミス対策）
+    this.TOKEN = (process.env.DISCORD_BOT_TOKEN || "")
+      .trim()
+      .replace(/^["']|["']$/g, "");
     this.HISTORY_MODE = process.env.HISTORY_MODE || "";
     this.MAX_MESSAGE_LENGTH = Number(process.env.MAX_MESSAGE_LENGTH) || 2000;
     this.MESSAGE_CONTENT_ALLOWED =
@@ -52,6 +58,17 @@ class DiscordBot {
     this.client = new Client({
       intents,
     });
+
+    // ===== デバッグ用ログ（原因特定後に debug は消してOK） =====
+    this.client.on("debug", (m) => console.log("[discord debug]", m));
+    this.client.on("warn", (m) => console.warn("[discord warn]", m));
+    this.client.on("error", (e) => console.error("[discord error]", e));
+    this.client.on("shardError", (e) => console.error("[shard error]", e));
+    this.client.on("shardDisconnect", (ev, id) =>
+      console.warn("[shard disconnect]", id, ev.code)
+    );
+    // ===========================================================
+
     this.difyClient = new DifyChatClient();
 
     this.client.once("ready", () => {
@@ -94,8 +111,15 @@ class DiscordBot {
     });
   }
 
-  public start() {
-    return this.client.login(this.TOKEN);
+  public async start() {
+    console.log("Logging in to Discord...");
+    try {
+      await this.client.login(this.TOKEN);
+      console.log("client.login() resolved");
+    } catch (e) {
+      console.error("client.login() failed:", e);
+      throw e;
+    }
   }
 
   private parseTriggerKeywords(): string[] {
@@ -133,10 +157,6 @@ class DiscordBot {
         .setDescription(
           "Start a new conversation with the bot. This will clear the chat history."
         )
-        // .addStringOption(option =>
-        //     option.setName('summarize')
-        //         .setDescription('Summarize the current conversation history and take it over to the new conversation.')
-        //         .setRequired(true))
         .toJSON(),
     ];
 
@@ -190,9 +210,11 @@ class DiscordBot {
       this.sendInteractionAnswer(interaction, messages, files);
     } catch (error) {
       console.error("Error sending message to Dify:", error);
-      await interaction.editReply({
-        content: "Sorry, something went wrong while generating the answer.",
-      });
+      await interaction
+        .editReply({
+          content: "Sorry, something went wrong while generating the answer.",
+        })
+        .catch(console.error);
     }
   }
 
@@ -217,16 +239,20 @@ class DiscordBot {
           : {};
 
       if (!interaction.replied && index === 0) {
-        interaction.editReply({
-          content: m,
-          ...additionalFields,
-        });
+        interaction
+          .editReply({
+            content: m,
+            ...additionalFields,
+          })
+          .catch((e) => console.error("editReply failed:", e));
       } else {
-        interaction.followUp({
-          content: m,
-          ephemeral: true,
-          ...additionalFields,
-        });
+        interaction
+          .followUp({
+            content: m,
+            ephemeral: true,
+            ...additionalFields,
+          })
+          .catch((e) => console.error("followUp failed:", e));
       }
     }
   }
@@ -259,22 +285,22 @@ class DiscordBot {
           },
           handleChatflowAnswer: (chatflowMessages, files) => {
             if (chatflowMessages.length > 0) {
-              this.sendChatnswer(message, chatflowMessages, files);
+              this.sendChatAnswer(message, chatflowMessages, files);
             }
           },
         }
       );
 
-      this.sendChatnswer(message, messages, files);
+      this.sendChatAnswer(message, messages, files);
     } catch (error) {
       console.error("Error sending message to Dify:", error);
-      await message.reply(
-        "Sorry, something went wrong while generating the answer."
-      );
+      await message
+        .reply("Sorry, something went wrong while generating the answer.")
+        .catch(console.error);
     }
   }
 
-  private sendChatnswer(
+  private sendChatAnswer(
     message: Message,
     messages: string[],
     files?: DifyFile[]
@@ -282,23 +308,25 @@ class DiscordBot {
     for (const [index, m] of messages.entries()) {
       if (m.length === 0) continue;
       if (index === 0) {
-        message.reply({
-          content: m,
-          files: files?.map((f) => ({
-            attachment: f.url,
-            name: f.extension
-              ? `generated_${f.type}.${f.extension}`
-              : `generated_${f.type}`,
-          })),
-        });
+        message
+          .reply({
+            content: m,
+            files: files?.map((f) => ({
+              attachment: f.url,
+              name: f.extension
+                ? `generated_${f.type}.${f.extension}`
+                : `generated_${f.type}`,
+            })),
+          })
+          .catch((e) => console.error("reply failed:", e));
       } else {
-        message.reply(m);
+        message.reply(m).catch((e) => console.error("reply failed:", e));
       }
     }
   }
 
-private async generateAnswer(
-    request: ChatMessageRequest, // reqiest から request に修正
+  private async generateAnswer(
+    request: ChatMessageRequest,
     {
       cacheKey,
       onPing,
@@ -317,10 +345,16 @@ private async generateAnswer(
   }> {
     if (request.query.length === 0)
       return Promise.resolve({ messages: [], files: [] });
-      
+
     console.log("=== Dify API Request Started ===", request.query);
 
     return new Promise(async (resolve, reject) => {
+      // Difyから応答が完了しない場合でも Promise が pending のままにならないようにする
+      const timer = setTimeout(() => {
+        console.error("=== DIFY TIMEOUT ===");
+        reject(new Error("Dify timeout"));
+      }, DIFY_TIMEOUT_MS);
+
       try {
         let buffer = { defaultAnswer: "", chatflowAnswer: "" };
         let files: VisionFile[] = [];
@@ -386,6 +420,7 @@ private async generateAnswer(
             }
           },
           onCompleted: () => {
+            clearTimeout(timer);
             console.log("=== Dify API Completed ===");
             resolve({
               messages: this.splitMessage(
@@ -407,7 +442,11 @@ private async generateAnswer(
           onPing,
         });
       } catch (error: any) {
-        console.error("=== DIFY API CATCH ERROR ===", error.response?.data || error.message || error);
+        clearTimeout(timer);
+        console.error(
+          "=== DIFY API CATCH ERROR ===",
+          error.response?.data || error.message || error
+        );
         reject(error);
       }
     });
