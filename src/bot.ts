@@ -61,6 +61,10 @@ class DiscordBot {
 
     // ===== デバッグ用ログ（原因特定後に debug は消してOK） =====
     this.client.on("debug", (m) => console.log("[discord debug]", m));
+    this.client.rest.on("rateLimited", (info) =>
+      console.warn("[rest rateLimited]", info)
+      );
+    this.client.rest.on("restDebug", (m) => console.log("[rest debug]", m));
     this.client.on("warn", (m) => console.warn("[discord warn]", m));
     this.client.on("error", (e) => console.error("[discord error]", e));
     this.client.on("shardError", (e) => console.error("[shard error]", e));
